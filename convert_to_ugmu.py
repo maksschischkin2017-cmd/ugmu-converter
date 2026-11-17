@@ -74,7 +74,33 @@ def paras(el):
     return out
 
 
+# Функция точного измерения ширины слова (ширина при кегле 100 px). На сайте её задаёт браузер,
+# измеряя настоящий шрифт Montserrat; без неё используется приблизительная оценка по числу букв.
+MEASURE = None
+_wcache = {}
+
+
+def _word_w(w):
+    v = _wcache.get(w)
+    if v is None:
+        v = _wcache[w] = float(MEASURE(w))
+    return v
+
+
 def n_lines(text, width_emu, pt, cw):
+    if MEASURE is not None and cw >= 0.55:
+        k = 1.07 if cw >= 0.6 else 1.0            # заголовки набраны более жирным начертанием
+        avail = width_emu / 12700.0               # доступная ширина в пунктах
+        sp = _word_w(" ") * pt / 100.0 * k
+        lines, cur = 1, 0.0
+        for w in text.split():
+            ww = _word_w(w) * pt / 100.0 * k
+            add = ww + (sp if cur else 0)
+            if cur + add > avail and cur:
+                lines += 1; cur = ww
+            else:
+                cur += add
+        return lines
     per = max(1, int(width_emu / 914400 * 72 / (pt * cw)))
     lines, cur = 1, 0
     for w in text.split():
@@ -699,6 +725,8 @@ def convert_one(template, src_path, out_path, o):
                     it["need"] = est_text_height(c, chain, g[2], comp, cw)
                     if it["need"] > g[3]:            # текст не помещается в свой блок
                         it["s"] = max(0.5, (g[3] / it["need"]) ** 0.5 * 0.97)
+                        if (g[3] / it["need"]) ** 0.5 * 0.97 < 0.5:
+                            warnings.append(f"слайд {n}: очень много текста в одном блоке - возможно, не помещается")
                     elif not it["visible"] and it["top"]:
                         it["h"] = max(int(it["need"] * 1.05), 200000)   # без рамки/заливки блок можно ужать до текста
                 items.append(it)
@@ -713,6 +741,8 @@ def convert_one(template, src_path, out_path, o):
                 need = est_text_height(it["c"], it["chain"], bw, it["comp"], it["cw"])
                 sc = 1.0 if need <= bh else max(0.45, (bh / need) ** 0.5 * 0.97)
                 it["s"], it["place"] = sc, (bl, bt, bw, int(min(need * 1.05, bh)) if sc == 1.0 else bh)
+                if need > bh and (bh / need) ** 0.5 * 0.97 < 0.45:
+                    warnings.append(f"слайд {n}: очень много текста - возможно, не помещается, проверьте")
                 f = 1.0
             else:
                 gs = [(it["g"][0], it["g"][1], it["g"][2], it["h"]) for it in items if it["g"]]

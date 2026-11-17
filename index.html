@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Конвертер презентаций в шаблон УГМУ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;600&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#fff;--fg:#222;--muted:#666;--card:#f6f3f4;--line:#ddd;--accent:#A81A42;--ok:#1b7f3b;--bad:#b3261e}
 @media (prefers-color-scheme:dark){:root{--bg:#1b1b1d;--fg:#eee;--muted:#aaa;--card:#27272a;--line:#3a3a3d;--accent:#d8365f;--ok:#4cc27a;--bad:#ff8a80}}
@@ -76,6 +78,9 @@ let pyodide = null, runFn = null, files = [], outputs = [], rows = [];
 
 const PY_ENTRY = `
 import json, convert_to_ugmu as c
+import js
+if getattr(js, "fontOk", False):
+    c.MEASURE = js.measureWord
 def run(i, label, font_comp, title_pt):
     opts = {"proto": {"title": None, "section": None, "content": None},
             "label": label or None, "keep_fonts": False,
@@ -84,8 +89,16 @@ def run(i, label, font_comp, title_pt):
     return json.dumps({"n": n, "w": w, "p": p})
 `;
 
+const _ctx = document.createElement("canvas").getContext("2d");
+window.measureWord = w => { _ctx.font = "300 100px Montserrat"; return _ctx.measureText(w).width; };
+window.fontOk = false;
+
 async function init() {
   try {
+    try {
+      await document.fonts.load("300 20px Montserrat", "Привет мир 0123 abc");
+      window.fontOk = document.fonts.check("300 20px Montserrat", "Привет");
+    } catch (_) { window.fontOk = false; }
     pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
     $("status").textContent = "Устанавливаю python-pptx…";
     await pyodide.loadPackage(["micropip", "lxml", "Pillow"]);
@@ -99,7 +112,7 @@ async function init() {
     pyodide.FS.writeFile("/work/convert_to_ugmu.py", py);
     await pyodide.runPythonAsync("import sys\nsys.path.insert(0,'/work')\n" + PY_ENTRY);
     runFn = pyodide.globals.get("run");
-    $("status").textContent = "Готово к работе. Выберите файлы.";
+    $("status").textContent = "Готово к работе. Выберите файлы." + (window.fontOk ? "" : " (шрифт Montserrat не загрузился, размеры текста считаются приблизительно)");
     updateUi();
   } catch (e) {
     $("status").innerHTML = '<span class="bad">Ошибка загрузки: ' + esc(e.message || String(e)) +
