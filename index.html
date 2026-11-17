@@ -46,8 +46,8 @@ td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
       <input type="text" id="label" placeholder="например: Педиатрия">
       <label>Максимальный размер заголовка на обычных слайдах, pt (в шаблоне 40)</label>
       <input type="number" id="titlePt" value="32" min="18" max="44">
-      <label>Поправка размера текста при смене шрифта на Montserrat (1 = без поправки)</label>
-      <input type="number" id="fontComp" value="0.9" min="0.6" max="1" step="0.05">
+      <label>Дополнительное уменьшение текста (1 = нет; текст и так уменьшается только там, где не помещается)</label>
+      <input type="number" id="fontComp" value="1" min="0.6" max="1" step="0.05">
     </details>
     <p><button id="go" disabled>Конвертировать</button></p>
     <div class="bar"><div id="prog"></div></div>

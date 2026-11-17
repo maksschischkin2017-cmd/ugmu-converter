@@ -285,6 +285,124 @@ def scale_tables(el, f):
         r.set("h", str(int(int(r.get("h")) * f)))
 
 
+
+# ================================================================ оценка размещения текста
+def style_chain(slide, el):
+    """Цепочка стилей текста: сам объект -> макет -> мастер (для поиска унаследованных размеров)."""
+    chain = [el.find("./p:txBody/a:lstStyle", NS)]
+    ph = el.find("./p:nvSpPr/p:nvPr/p:ph", NS)
+    try:
+        layout = slide.slide_layout
+        master = layout.slide_master
+        typ = ph.get("type") if ph is not None else None
+        if ph is not None:
+            for lph in layout.placeholders:
+                if str(lph.placeholder_format.idx) == ph.get("idx", "0"):
+                    chain.append(lph._element.find("./p:txBody/a:lstStyle", NS))
+                    break
+        name = "otherStyle" if ph is None else ("titleStyle" if typ in ("title", "ctrTitle") else "bodyStyle")
+        chain.append(master._element.find(".//p:txStyles/p:" + name, NS))
+    except Exception:
+        pass
+    return chain
+
+
+def _lvl(chain, lvl, sub):
+    for ch in chain:
+        if ch is None:
+            continue
+        node = ch.find(qn(f"a:lvl{lvl}pPr"))
+        if node is None:
+            continue
+        found = node.find(sub, NS) if sub else node
+        if found is not None:
+            return found
+    return None
+
+
+def est_text_height(c, chain, width_emu, comp, cw):
+    """Грубая оценка высоты текста блока (EMU) с учётом шрифта, отступов, интервалов."""
+    body = c.find(qn("p:txBody"))
+    if body is None:
+        return 0
+    bp = body.find(qn("a:bodyPr"))
+    li = int(bp.get("lIns", 91440)); ri = int(bp.get("rIns", 91440))
+    ti = int(bp.get("tIns", 45720)); bi = int(bp.get("bIns", 45720))
+    cur = 1.0
+    na = bp.find(qn("a:normAutofit"))
+    if na is not None and na.get("fontScale"):
+        cur = int(na.get("fontScale")) / 100000
+    total = 0.0
+    for p in body.findall(qn("a:p")):
+        ppr = p.find(qn("a:pPr"))
+        lvl = int(ppr.get("lvl", 0)) + 1 if ppr is not None else 1
+        # размер шрифта
+        szs = [int(r.get("sz")) for r in p.iter(qn("a:rPr")) if r.get("sz")]
+        if szs:
+            sz = max(szs) / 100
+        else:
+            d = _lvl(chain, lvl, "a:defRPr")
+            ep = p.find(qn("a:endParaRPr"))
+            sz = int(ep.get("sz")) / 100 if ep is not None and ep.get("sz") else \
+                (int(d.get("sz")) / 100 if d is not None and d.get("sz") else 18)
+        sz *= cur * comp
+        # отступ слева
+        marl = None
+        if ppr is not None and ppr.get("marL") is not None:
+            marl = int(ppr.get("marL"))
+        else:
+            lv = _lvl(chain, lvl, None)
+            marl = int(lv.get("marL", 0)) if lv is not None else 0
+        # межстрочный и интервалы
+        lns = 1.0
+        for src in (ppr, _lvl(chain, lvl, None)):
+            if src is not None:
+                sp = src.find("./a:lnSpc/a:spcPct", NS)
+                if sp is not None:
+                    lns = int(sp.get("val")) / 100000
+                    break
+        def space(tag):
+            for src in (ppr, _lvl(chain, lvl, None)):
+                if src is not None:
+                    pc = src.find(f"./a:{tag}/a:spcPct", NS)
+                    if pc is not None:
+                        return int(pc.get("val")) / 100000 * sz
+                    pt = src.find(f"./a:{tag}/a:spcPts", NS)
+                    if pt is not None:
+                        return int(pt.get("val")) / 100
+            return 0
+        # текст по строкам (a:br - принудительный перенос)
+        segs, cur_t = [], ""
+        for ch in p:
+            if ch.tag == qn("a:br"):
+                segs.append(cur_t); cur_t = ""
+            elif ch.tag in (qn("a:r"), qn("a:fld")):
+                cur_t += "".join(t.text or "" for t in ch.iter(qn("a:t")))
+        segs.append(cur_t)
+        avail = max(width_emu - li - ri - marl, 300000)
+        lines = sum(max(1, n_lines(t, avail, sz, cw)) if t.strip() else 1 for t in segs)
+        total += lines * sz * 1.2 * lns + space("spcBef") + space("spcAft")
+    return int(total * 12700 + ti + bi)
+
+
+def is_visible(c):
+    sp = c.find(qn("p:spPr"))
+    if sp is None:
+        return False
+    fill = any(sp.find(qn("a:" + t)) is not None for t in ("solidFill", "gradFill", "blipFill", "pattFill"))
+    ln = sp.find(qn("a:ln"))
+    has_ln = ln is not None and ln.find(qn("a:noFill")) is None and \
+        any(ln.find(qn("a:" + t)) is not None for t in ("solidFill", "gradFill", "pattFill"))
+    styled = c.find(qn("p:style")) is not None and not (
+        sp.find(qn("a:noFill")) is not None and (ln is not None and ln.find(qn("a:noFill")) is not None))
+    return fill or has_ln or styled
+
+
+def anchor_top(c):
+    bp = c.find("./p:txBody/a:bodyPr", NS)
+    return bp is None or bp.get("anchor", "t") == "t"
+
+
 # ================================================================ рамки шаблона
 def find_protos(prs, ov):
     slides = list(prs.slides)
@@ -548,26 +666,14 @@ def convert_one(template, src_path, out_path, o):
             # --- содержимое
             rid_map = copy_rels(s.part, new.part, package, memo, deferred,
                                 skip_types=(RT.SLIDE_LAYOUT, RT.NOTES_SLIDE))
-            wr = {}
-            for el in content_els:
-                try:
-                    w = SlideShapeFactory(el, s.shapes); wr[el] = geom(w)
-                except Exception:
-                    wr[el] = None
-            gs = [g for g in wr.values() if g]
-            bl, bt, bw = LEFT, top, RIGHT - LEFT
-            bh = sh_ - BOTTOM_MARGIN - bt
-            if gs:
-                x0 = min(g[0] for g in gs); y0 = min(g[1] for g in gs)
-                x1 = max(g[0] + g[2] for g in gs); y1 = max(g[1] + g[3] for g in gs)
-                f = min(base, bw / max(x1 - x0, 1), bh / max(y1 - y0, 1))
-            else:
-                f, x0, y0 = base, 0, 0
             id_map = {}
             used = [int(i) for i in new._element.xpath("//p:cNvPr/@id")]
             nid = max(used + [1]) + 1
             kept_obj = False
+            fcomp = o.get("font_comp", 1.0)
+            items = []
             for el in content_els:
+                chain = style_chain(s, el)
                 c = copy.deepcopy(el)
                 remap_rids(c, rid_map)
                 for cnv in c.iter(qn("p:cNvPr")):
@@ -579,20 +685,59 @@ def convert_one(template, src_path, out_path, o):
                         kept_obj = True
                     else:
                         ph.getparent().remove(ph)
-                comp = 1.0
-                if not o.get("keep_fonts") and restyle_fonts(c):
-                    comp = o.get("font_comp", 0.9)
-                scale_text(c, f * comp)
+                restyled = (not o.get("keep_fonts")) and restyle_fonts(c)
+                comp = fcomp if restyled else 1.0
+                cw = 0.57 if restyled else 0.5
+                try:
+                    g = geom(SlideShapeFactory(el, s.shapes))
+                except Exception:
+                    g = None
+                it = {"c": c, "g": g, "comp": comp, "cw": cw, "chain": chain, "need": None,
+                      "visible": True, "top": True, "s": 1.0, "h": g[3] if g else None}
+                if g and c.tag == qn("p:sp") and sp_text(c).strip():
+                    it["visible"], it["top"] = is_visible(c), anchor_top(c)
+                    it["need"] = est_text_height(c, chain, g[2], comp, cw)
+                    if it["need"] > g[3]:            # текст не помещается в свой блок
+                        it["s"] = max(0.5, (g[3] / it["need"]) ** 0.5 * 0.97)
+                    elif not it["visible"] and it["top"]:
+                        it["h"] = max(int(it["need"] * 1.05), 200000)   # без рамки/заливки блок можно ужать до текста
+                items.append(it)
+
+            bl, bt, bw = LEFT, top, RIGHT - LEFT
+            bh = sh_ - BOTTOM_MARGIN - bt
+            single = len(items) == 1 and items[0]["need"] is not None and not items[0]["visible"] \
+                and items[0]["g"] is not None
+            if single:
+                # единственный текстовый блок: используем всю ширину сетки (меньше строк - крупнее текст)
+                it = items[0]
+                need = est_text_height(it["c"], it["chain"], bw, it["comp"], it["cw"])
+                sc = 1.0 if need <= bh else max(0.45, (bh / need) ** 0.5 * 0.97)
+                it["s"], it["place"] = sc, (bl, bt, bw, int(min(need * 1.05, bh)) if sc == 1.0 else bh)
+                f = 1.0
+            else:
+                gs = [(it["g"][0], it["g"][1], it["g"][2], it["h"]) for it in items if it["g"]]
+                if gs:
+                    x0 = min(g[0] for g in gs); y0 = min(g[1] for g in gs)
+                    x1 = max(g[0] + g[2] for g in gs); y1 = max(g[1] + g[3] for g in gs)
+                    f = min(base, bw / max(x1 - x0, 1), bh / max(y1 - y0, 1))
+                else:
+                    f, x0, y0 = base, 0, 0
+                for it in items:
+                    if it["g"]:
+                        g = it["g"]
+                        it["place"] = (int(bl + (g[0] - x0) * f), int(bt + (it["g"][1] - y0) * f),
+                                       int(g[2] * f), int(it["h"] * f))
+            for it in items:
+                c = it["c"]
+                scale_text(c, (f if not single else 1.0) * it["comp"] * it["s"])
                 scale_tables(c, f)
-                tree_new = new.shapes._spTree
-                tree_new.insert_element_before(c, "p:extLst")
+                new.shapes._spTree.insert_element_before(c, "p:extLst")
                 dst_els.append(c)
-                g = wr.get(el)
-                if g:
+                if it["g"]:
                     try:
                         nw = SlideShapeFactory(c, new.shapes)
-                        nw.left = int(bl + (g[0] - x0) * f); nw.top = int(bt + (g[1] - y0) * f)
-                        nw.width = int(g[2] * f); nw.height = int(g[3] * f)
+                        x, y, w_, h_ = it["place"]
+                        nw.left, nw.top, nw.width, nw.height = int(x), int(y), int(w_), int(h_)
                     except Exception as e:
                         warnings.append(f"слайд {n}: не удалось пересчитать положение объекта: {e}")
                 else:
@@ -667,8 +812,8 @@ def main():
     ap.add_argument("--proto-title", type=int); ap.add_argument("--proto-section", type=int)
     ap.add_argument("--proto-content", type=int)
     ap.add_argument("--keep-fonts", action="store_true", help="не менять шрифты исходника на Montserrat")
-    ap.add_argument("--font-comp", type=float, default=0.9,
-                    help="поправка размера при смене шрифта на более широкий Montserrat (1 = без поправки)")
+    ap.add_argument("--font-comp", type=float, default=1.0,
+                    help="дополнительное уменьшение текста при смене шрифта (1 = нет; текст и так уменьшается только там, где не помещается)")
     ap.add_argument("--no-guess", action="store_true")
     ap.add_argument("--title-pt", type=int, default=32, help="максимальный размер заголовка на обычных слайдах (в шаблоне 40)")
     a = ap.parse_args()
