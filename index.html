@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Конвертер презентаций в шаблон УГМУ</title>
+<style>
+:root{--bg:#fff;--fg:#222;--muted:#666;--card:#f6f3f4;--line:#ddd;--accent:#A81A42;--ok:#1b7f3b;--bad:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#1b1b1d;--fg:#eee;--muted:#aaa;--card:#27272a;--line:#3a3a3d;--accent:#d8365f;--ok:#4cc27a;--bad:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;font-family:Montserrat,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--fg);line-height:1.5}
+header{background:#A81A42;color:#fff;padding:28px 20px}
+header h1{margin:0 auto;max-width:860px;font-size:1.6rem;font-weight:600}
+header p{margin:6px auto 0;max-width:860px;opacity:.9}
+main{max-width:860px;margin:0 auto;padding:24px 20px 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:18px}
+#drop{border:2px dashed var(--accent);border-radius:12px;padding:34px 16px;text-align:center;cursor:pointer}
+#drop.over{background:rgba(168,26,66,.08)}
+button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:11px 20px;font-size:1rem;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.sec{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+label{display:block;margin:10px 0 4px;font-size:.9rem;color:var(--muted)}
+input[type=text],input[type=number]{width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font-size:1rem}
+details summary{cursor:pointer;color:var(--accent)}
+.bar{height:10px;background:var(--line);border-radius:6px;overflow:hidden;margin:10px 0}
+.bar>div{height:100%;width:0;background:var(--accent);transition:width .2s}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertical-align:top}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--muted);font-size:.82rem}
+#status{color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Конвертер презентаций в шаблон УГМУ</h1>
+  <p>Перенос слайдов в оформление УГМУ без потери текста, картинок, таблиц и диаграмм</p>
+</header>
+<main>
+  <div class="card">
+    <div id="drop">Перетащите сюда файлы .pptx (можно много) или нажмите для выбора</div>
+    <input id="file" type="file" accept=".pptx" multiple hidden>
+    <p id="count" class="warn"></p>
+    <details>
+      <summary>Дополнительные настройки</summary>
+      <label>Надпись слева в шапке слайдов (по умолчанию «Презентация»)</label>
+      <input type="text" id="label" placeholder="например: Педиатрия">
+      <label>Максимальный размер заголовка на обычных слайдах, pt (в шаблоне 40)</label>
+      <input type="number" id="titlePt" value="32" min="18" max="44">
+      <label>Поправка размера текста при смене шрифта на Montserrat (1 = без поправки)</label>
+      <input type="number" id="fontComp" value="0.9" min="0.6" max="1" step="0.05">
+    </details>
+    <p><button id="go" disabled>Конвертировать</button></p>
+    <div class="bar"><div id="prog"></div></div>
+    <div id="status">Загрузка Python в браузер…</div>
+  </div>
+
+  <div class="card" id="resCard" hidden>
+    <h3 style="margin-top:0">Результат</h3>
+    <p><button id="dl">Скачать всё (ZIP + report.csv)</button></p>
+    <table id="res"><thead><tr><th>Файл</th><th>Статус</th><th>Слайдов</th><th>Примечания</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="card warn">
+    Файлы не отправляются на сервер: вся обработка идёт в вашем браузере. Для работы нужен интернет
+    (при первом открытии загружается Python, около 10–20 МБ). Файлы со статусом «ПРОВЕРИТЬ» откройте в PowerPoint и просмотрите.
+    Шрифт Montserrat должен быть установлен на компьютере.
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let pyodide = null, runFn = null, files = [], outputs = [], rows = [];
+
+const PY_ENTRY = `
+import json, convert_to_ugmu as c
+def run(i, label, font_comp, title_pt):
+    opts = {"proto": {"title": None, "section": None, "content": None},
+            "label": label or None, "keep_fonts": False,
+            "font_comp": float(font_comp), "no_guess": False, "title_pt": int(title_pt)}
+    n, w, p = c.convert_one("/work/template.pptx", "/work/in/%d.pptx" % i, "/work/out/%d.pptx" % i, opts)
+    return json.dumps({"n": n, "w": w, "p": p})
+`;
+
+async function init() {
+  try {
+    pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
+    $("status").textContent = "Устанавливаю python-pptx…";
+    await pyodide.loadPackage(["micropip", "lxml", "Pillow"]);
+    await pyodide.runPythonAsync("import micropip\nawait micropip.install('python-pptx')");
+    for (const d of ["/work", "/work/in", "/work/out"]) pyodide.FS.mkdir(d);
+    const [tpl, py] = await Promise.all([
+      fetch("template.pptx").then(r => { if (!r.ok) throw new Error("template.pptx не найден"); return r.arrayBuffer(); }),
+      fetch("convert_to_ugmu.py").then(r => { if (!r.ok) throw new Error("convert_to_ugmu.py не найден"); return r.text(); })
+    ]);
+    pyodide.FS.writeFile("/work/template.pptx", new Uint8Array(tpl));
+    pyodide.FS.writeFile("/work/convert_to_ugmu.py", py);
+    await pyodide.runPythonAsync("import sys\nsys.path.insert(0,'/work')\n" + PY_ENTRY);
+    runFn = pyodide.globals.get("run");
+    $("status").textContent = "Готово к работе. Выберите файлы.";
+    updateUi();
+  } catch (e) {
+    $("status").innerHTML = '<span class="bad">Ошибка загрузки: ' + esc(e.message || String(e)) +
+      '. Откройте страницу по адресу https:// (не как файл) и проверьте интернет.</span>';
+  }
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function updateUi() {
+  $("count").textContent = files.length ? "Выбрано файлов: " + files.length : "";
+  $("go").disabled = !(runFn && files.length);
+}
+function addFiles(list) {
+  for (const f of list) if (/\.pptx$/i.test(f.name) && !f.name.startsWith("~$")) files.push(f);
+  updateUi();
+}
+
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+$("file").onchange = e => { addFiles(e.target.files); e.target.value = ""; };
+["dragover", "dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
+
+$("go").onclick = async () => {
+  $("go").disabled = true; $("resCard").hidden = true;
+  outputs = []; rows = []; $("res").tBodies[0].innerHTML = "";
+  const label = $("label").value.trim(), tpt = $("titlePt").value, fc = $("fontComp").value;
+  const used = new Set();
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    $("status").textContent = "Обработка " + (i + 1) + " из " + files.length + ": " + f.name;
+    $("prog").style.width = (i / files.length * 100) + "%";
+    await new Promise(r => setTimeout(r, 30));   // даём браузеру перерисовать страницу
+    let status = "ok", n = 0, probs = [], warns = [];
+    try {
+      pyodide.FS.writeFile("/work/in/" + i + ".pptx", new Uint8Array(await f.arrayBuffer()));
+      const r = JSON.parse(runFn(i, label, fc, tpt));
+      n = r.n; probs = r.p; warns = r.w;
+      if (probs.length) status = "ПРОВЕРИТЬ";
+      let name = f.name; if (used.has(name)) name = i + "_" + name; used.add(name);
+      outputs.push({ name, data: pyodide.FS.readFile("/work/out/" + i + ".pptx") });
+    } catch (e) { status = "ОШИБКА"; probs = [String(e.message || e).split("\n").slice(-2).join(" ")]; }
+    for (const p of ["/work/in/" + i + ".pptx", "/work/out/" + i + ".pptx"]) { try { pyodide.FS.unlink(p); } catch (_) {} }
+    rows.push([f.name, status, n, probs.join(" | "), warns.join(" | ")]);
+    const tr = document.createElement("tr");
+    const cls = status === "ok" ? "ok" : "bad";
+    tr.innerHTML = "<td>" + esc(f.name) + "</td><td class='" + cls + "'>" + status + "</td><td>" + n +
+      "</td><td class='warn'>" + esc(probs.concat(warns).join(" | ")) + "</td>";
+    $("res").tBodies[0].appendChild(tr);
+  }
+  $("prog").style.width = "100%";
+  const bad = rows.filter(r => r[1] !== "ok").length;
+  $("status").textContent = "Готово: " + (rows.length - bad) + " без замечаний, требуют проверки: " + bad;
+  $("resCard").hidden = false; $("go").disabled = false;
+};
+
+$("dl").onclick = async () => {
+  const zip = new JSZip();
+  for (const o of outputs) zip.file(o.name, o.data);
+  const q = s => '"' + String(s).replace(/"/g, '""') + '"';
+  const csv = "\ufeff" + [["файл","статус","слайдов","потери/расхождения","предупреждения"], ...rows].map(r => r.map(q).join(";")).join("\r\n");
+  zip.file("report.csv", csv);
+  const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "ugmu_presentations.zip"; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+};
+
+init();
+</script>
+</body>
+</html>
