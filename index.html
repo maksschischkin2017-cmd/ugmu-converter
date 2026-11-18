@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Конвертер презентаций в шаблон УГМУ</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;600&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#fff;--fg:#222;--muted:#666;--card:#f6f3f4;--line:#ddd;--accent:#A81A42;--ok:#1b7f3b;--bad:#b3261e}
 @media (prefers-color-scheme:dark){:root{--bg:#1b1b1d;--fg:#eee;--muted:#aaa;--card:#27272a;--line:#3a3a3d;--accent:#d8365f;--ok:#4cc27a;--bad:#ff8a80}}
@@ -58,7 +58,7 @@ td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
         <input type="password" id="trKey" placeholder="AIza..." autocomplete="off"></div>
         <label style="display:flex;gap:8px;align-items:flex-start;color:var(--fg)"><input type="checkbox" id="imgOn" style="margin-top:4px">
           <span>Переводить текст на картинках (бета). Бесплатное распознавание Tesseract прямо в браузере.
-          Картинки с логотипом УГМУ, маленькие и титульные не трогаются. Если результат плохой, просто снимите галочку.</span></label>
+          Переводятся только таблицы с рамками (по ячейкам, линии сетки не трогаются; числа и значки остаются). Картинки без сетки, с логотипом УГМУ, маленькие и титульные не трогаются. Если результат плохой, просто снимите галочку.</span></label>
         <p class="warn">Переводится текст слайдов и таблиц. Без галочки выше текст внутри картинок не переводится (в отчёте это отмечено). С галочкой первая загрузка распознавалки занимает время (десятки МБ), а каждая картинка обрабатывается заметно дольше.
         Смешанные файлы (русские и английские слайды вместе) только делятся, не переводятся.</p>
       </div>
@@ -170,6 +170,8 @@ async function init() {
   try {
     try {
       await document.fonts.load("300 20px Montserrat", "Привет мир 0123 abc");
+      await document.fonts.load("400 20px Montserrat", "Привет мир 0123 abc");
+      await document.fonts.load("600 20px Montserrat", "Привет мир 0123 abc");
       window.fontOk = document.fonts.check("300 20px Montserrat", "Привет");
     } catch (_) { window.fontOk = false; }
     pyodide = await loadPyodide({ indexURL: "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/" });
@@ -281,6 +283,7 @@ async function getWorker() {
   $("status").textContent = "Загружаю распознавание текста (первый раз это долго)…";
   if (!window.Tesseract) await loadScript("https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js");
   ocrWorker = await Tesseract.createWorker(["rus", "eng"]);
+  await ocrWorker.setParameters({ tessedit_pageseg_mode: "6", preserve_interword_spaces: "1" });
   return ocrWorker;
 }
 function aHash(bitmap) {
@@ -304,47 +307,124 @@ async function loadLogoHash() {
 function median(a) { a.sort((x, y) => x - y); return a[a.length >> 1]; }
 function lum(r, g, b) { return 0.299 * r + 0.587 * g + 0.114 * b; }
 
-function renderTranslated(bitmap, items) {
-  const w = bitmap.width, h = bitmap.height;
-  const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
-  const ctx = cv.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(bitmap, 0, 0);
-  const px = ctx.getImageData(0, 0, w, h).data;
-  const at = (x, y) => { const i = (Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))) * 4; return [px[i], px[i+1], px[i+2]]; };
-  for (const it of items) {
-    const pad = 2, x0 = Math.max(0, Math.floor(it.x0) - pad), y0 = Math.max(0, Math.floor(it.y0) - pad);
-    const x1 = Math.min(w, Math.ceil(it.x1) + pad), y1 = Math.min(h, Math.ceil(it.y1) + pad);
-    const bw = x1 - x0, bh = y1 - y0;
-    if (bw < 4 || bh < 4) continue;
-    // цвет фона: медиана пикселей по кольцу вокруг рамки
-    const R = [], G = [], B = [];
-    for (let x = x0 - 3; x <= x1 + 3; x += 2) for (const y of [y0 - 3, y0 - 2, y1 + 2, y1 + 3]) { const c = at(x, y); R.push(c[0]); G.push(c[1]); B.push(c[2]); }
-    for (let y = y0; y <= y1; y += 2) for (const x of [x0 - 3, x0 - 2, x1 + 2, x1 + 3]) { const c = at(x, y); R.push(c[0]); G.push(c[1]); B.push(c[2]); }
-    const bg = [median(R), median(G), median(B)], bgL = lum(...bg);
-    // цвет текста: самые контрастные пиксели внутри рамки
-    const diffs = [];
-    for (let y = y0 + pad; y < y1 - pad; y++) for (let x = x0 + pad; x < x1 - pad; x++) { const c = at(x, y); diffs.push([Math.abs(lum(...c) - bgL), c]); }
-    diffs.sort((a, b) => b[0] - a[0]);
-    const top = diffs.slice(0, Math.max(3, Math.floor(diffs.length * 0.08)));
-    let fg = top.length ? [0, 1, 2].map(k => Math.round(top.reduce((s, d) => s + d[1][k], 0) / top.length)) : [0, 0, 0];
-    if (!top.length || Math.abs(lum(...fg) - bgL) < 70) fg = bgL > 128 ? [20, 20, 20] : [245, 245, 245];
-    ctx.fillStyle = "rgb(" + bg.join(",") + ")"; ctx.fillRect(x0, y0, bw, bh);
-    // подбор размера шрифта под ширину рамки
-    let size = Math.min(bh * 0.85, 60);
-    const maxW = bw * 1.04;
-    ctx.textBaseline = "middle";
-    const font = s => s + "px Montserrat, Arial, sans-serif";
-    ctx.font = font(size);
-    while (size > 7 && ctx.measureText(it.text).width > maxW) { size -= 0.5; ctx.font = font(size); }
-    ctx.fillStyle = "rgb(" + fg.join(",") + ")";
-    ctx.fillText(it.text, x0 + pad, y0 + bh / 2, maxW);   // 4-й параметр сожмёт текст, если он всё равно шире
+// ---- поиск ячеек таблицы: длинные тёмные линии -> сетка -> связные области между линиями
+function findCells(gray, W, H) {
+  const dark = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) dark[i] = gray[i] < 150 ? 1 : 0;
+  const line = new Uint8Array(W * H);
+  const minH = Math.max(25, Math.round(W * 0.04)), minV = Math.max(25, Math.round(H * 0.04));
+  for (let y = 0; y < H; y++) {
+    let x = 0;
+    while (x < W) {
+      if (dark[y * W + x]) { const s = x; while (x < W && dark[y * W + x]) x++; if (x - s >= minH) for (let k = s; k < x; k++) line[y * W + k] = 1; }
+      else x++;
+    }
   }
-  return cv;
+  for (let x = 0; x < W; x++) {
+    let y = 0;
+    while (y < H) {
+      if (dark[y * W + x]) { const s = y; while (y < H && dark[y * W + x]) y++; if (y - s >= minV) for (let k = s; k < y; k++) line[k * W + x] = 1; }
+      else y++;
+    }
+  }
+  const tmp = new Uint8Array(W * H), thick = new Uint8Array(W * H);   // утолщаем линии на 1 px, чтобы закрыть разрывы
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; tmp[i] = line[i] | (x > 0 ? line[i - 1] : 0) | (x < W - 1 ? line[i + 1] : 0); }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; thick[i] = tmp[i] | (y > 0 ? tmp[i - W] : 0) | (y < H - 1 ? tmp[i + W] : 0); }
+  const seen = new Uint8Array(W * H), stack = new Int32Array(W * H), cells = [];
+  for (let s = 0; s < W * H; s++) {
+    if (thick[s] || seen[s]) continue;
+    let sp = 0, minx = W, miny = H, maxx = 0, maxy = 0;
+    stack[sp++] = s; seen[s] = 1;
+    while (sp) {
+      const i = stack[--sp], x = i % W, y = (i / W) | 0;
+      if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+      if (x > 0 && !thick[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack[sp++] = i - 1; }
+      if (x < W - 1 && !thick[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack[sp++] = i + 1; }
+      if (y > 0 && !thick[i - W] && !seen[i - W]) { seen[i - W] = 1; stack[sp++] = i - W; }
+      if (y < H - 1 && !thick[i + W] && !seen[i + W]) { seen[i + W] = 1; stack[sp++] = i + W; }
+    }
+    const w = maxx - minx + 1, h = maxy - miny + 1;
+    if (minx <= 0 || miny <= 0 || maxx >= W - 1 || maxy >= H - 1) continue;   // внешний фон
+    if (w < 12 || h < 12) continue;
+    cells.push({ x: minx, y: miny, w, h });
+  }
+  return cells;
 }
 
-function canvasBlob(cv, ext) {
-  return new Promise(res => cv.toBlob(res, ext === "png" ? "image/png" : "image/jpeg", 0.93));
+function inkInfo(gray, W, x0, y0, x1, y1) {
+  let n = 0, bx0 = 1e9, by0 = 1e9, bx1 = -1, by1 = -1;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (gray[y * W + x] < 150) {
+    n++; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y;
+  }
+  return { count: n, x0: bx0, y0: by0, x1: bx1 + 1, y1: by1 + 1 };
 }
+
+function wrapLines(ctx, text, maxW) {
+  const lines = []; let cur = "";
+  for (const w of text.split(" ")) {
+    const t = cur ? cur + " " + w : w;
+    if (!cur || ctx.measureText(t).width <= maxW) cur = t; else { lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function makePainter(px, W, H, ctx) {
+  const at = (x, y) => { const i = (Math.min(H - 1, Math.max(0, y)) * W + Math.min(W - 1, Math.max(0, x))) * 4; return [px[i], px[i + 1], px[i + 2]]; };
+  const bgColor = (x0, y0, x1, y1) => {          // медиана по рамке-кольцу
+    const R = [], G = [], B = [];
+    const push = (x, y) => { const c = at(x, y); R.push(c[0]); G.push(c[1]); B.push(c[2]); };
+    for (let x = x0; x <= x1; x += 2) { push(x, y0); push(x, y1); }
+    for (let y = y0; y <= y1; y += 2) { push(x0, y); push(x1, y); }
+    return [median(R), median(G), median(B)];
+  };
+  const fgColor = (x0, y0, x1, y1, bg) => {      // самые контрастные пиксели внутри рамки
+    const bl = lum(...bg), d = [];
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const c = at(x, y); d.push([Math.abs(lum(...c) - bl), c]); }
+    d.sort((a, b) => b[0] - a[0]);
+    const top = d.slice(0, Math.max(3, Math.floor(d.length * 0.08)));
+    let fg = top.length ? [0, 1, 2].map(k => Math.round(top.reduce((s, t) => s + t[1][k], 0) / top.length)) : [0, 0, 0];
+    if (!top.length || Math.abs(lum(...fg) - bl) < 70) fg = bl > 128 ? [20, 20, 20] : [245, 245, 245];
+    return fg;
+  };
+  const FONT = (bold, s) => (bold ? "600 " : "400 ") + s + "px Montserrat, Arial, sans-serif";
+  // рисуем текст внутри прямоугольника (с переносами), выравнивание берём из оригинала
+  const drawBox = (box, ink, text, nLines, fillRect, bg) => {
+    const fg = fgColor(ink.x0, ink.y0, ink.x1, ink.y1, bg);
+    ctx.fillStyle = "rgb(" + bg.join(",") + ")";
+    ctx.fillRect(fillRect.x, fillRect.y, fillRect.w, fillRect.h);
+    const density = ink.count / Math.max(1, (ink.x1 - ink.x0) * (ink.y1 - ink.y0));
+    const bold = density > 0.34;
+    const maxW = box.w - 6, availH = box.h - 6;
+    const origLine = (ink.y1 - ink.y0) / Math.max(1, nLines);
+    let size = Math.max(8, Math.min(origLine * 0.95, box.h * 0.6, 60));
+    let lines;
+    for (; ; size -= 0.5) {
+      ctx.font = FONT(bold, size); lines = wrapLines(ctx, text, maxW);
+      const okW = lines.every(l => ctx.measureText(l).width <= maxW * 1.02);
+      if ((lines.length * size * 1.18 <= availH && okW) || size <= 7) break;
+    }
+    const centered = Math.abs((ink.x0 + ink.x1) / 2 - (box.x + box.w / 2)) <= box.w * 0.12;
+    ctx.fillStyle = "rgb(" + fg.join(",") + ")";
+    ctx.textBaseline = "middle"; ctx.textAlign = centered ? "center" : "left";
+    const cy = (ink.y0 + ink.y1) / 2, lh = size * 1.18;
+    const tx = centered ? box.x + box.w / 2 : Math.max(box.x + 3, ink.x0);
+    lines.forEach((l, k) => ctx.fillText(l, tx, cy - (lines.length - 1) * lh / 2 + k * lh, maxW * 1.02));
+  };
+  return { bgColor, drawBox };
+}
+
+async function ocrCrop(worker, base, x, y, w, h, scale) {
+  const pad = 8, c = document.createElement("canvas");
+  c.width = Math.round(w * scale) + pad * 2; c.height = Math.round(h * scale) + pad * 2;
+  const cx = c.getContext("2d");
+  cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height);
+  cx.imageSmoothingQuality = "high";
+  cx.drawImage(base, x, y, w, h, pad, pad, w * scale, h * scale);
+  const { data } = await worker.recognize(c);
+  return data;
+}
+const cleanCell = t => t.replace(/\s+/g, " ").replace(/([a-zа-яё])-\s+([a-zа-яё])/gi, "$1$2").trim();
 
 async function processImage(cd, bytes, sl, tl) {
   const mime = cd.ext === "png" ? "image/png" : "image/jpeg";
@@ -352,24 +432,86 @@ async function processImage(cd, bytes, sl, tl) {
   const bitmap = await createImageBitmap(origBlob);
   const lh = await loadLogoHash();
   if (lh && hamming(aHash(bitmap), lh) <= 10) return { skip: "логотип" };
-  // увеличиваем мелкие картинки для лучшего распознавания
-  const k = Math.min(3, Math.max(1, 2200 / bitmap.width));
-  const oc = document.createElement("canvas"); oc.width = Math.round(bitmap.width * k); oc.height = Math.round(bitmap.height * k);
-  oc.getContext("2d").drawImage(bitmap, 0, 0, oc.width, oc.height);
+  const W = bitmap.width, H = bitmap.height;
+  const base = document.createElement("canvas"); base.width = W; base.height = H;
+  const bctx = base.getContext("2d", { willReadFrequently: true });
+  bctx.drawImage(bitmap, 0, 0);
+  const px = bctx.getImageData(0, 0, W, H).data;
+  const gray = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) gray[i] = (px[i * 4] * 299 + px[i * 4 + 1] * 587 + px[i * 4 + 2] * 114) / 1000;
+  // сетку ищем на уменьшенной копии, если картинка очень большая
+  const d = Math.max(1, Math.sqrt(W * H / 3e6));
+  let cells;
+  if (d > 1) {
+    const gW = Math.round(W / d), gH = Math.round(H / d), c2 = document.createElement("canvas");
+    c2.width = gW; c2.height = gH; const x2 = c2.getContext("2d", { willReadFrequently: true }); x2.drawImage(bitmap, 0, 0, gW, gH);
+    const p2 = x2.getImageData(0, 0, gW, gH).data, g2 = new Uint8Array(gW * gH);
+    for (let i = 0; i < gW * gH; i++) g2[i] = (p2[i * 4] * 299 + p2[i * 4 + 1] * 587 + p2[i * 4 + 2] * 114) / 1000;
+    cells = findCells(g2, gW, gH).map(c => ({ x: Math.round(c.x * d), y: Math.round(c.y * d), w: Math.round(c.w * d), h: Math.round(c.h * d) }));
+  } else cells = findCells(gray, W, H);
+  if (cells.length < 4) return { skip: "не таблица (сетка не найдена), картинка не тронута" };
+
   const worker = await getWorker();
-  const { data } = await worker.recognize(oc);
-  const full = (data.text || "").toLowerCase();
-  if (/угму|ugmu|уральск/.test(full)) return { skip: "логотип УГМУ" };
-  const isSrc = t => sl === "ru" ? /[А-Яа-яЁё]/.test(t) : (t.match(/[A-Za-z]/g) || []).length >= 3;
-  const lines = (data.lines || []).filter(l => l.confidence >= 55 && l.text.trim().length >= 2 && isSrc(l.text)
-    && (l.bbox.y1 - l.bbox.y0) / k >= 6);
-  if (!lines.length) return { skip: "текста не найдено" };
-  const texts = lines.map(l => l.text.replace(/\s+/g, " ").trim());
-  const tr = await translateTexts(texts, sl, tl);
-  const items = lines.map((l, j) => ({ x0: l.bbox.x0 / k, y0: l.bbox.y0 / k, x1: l.bbox.x1 / k, y1: l.bbox.y1 / k, text: tr[j] }));
-  const cv = renderTranslated(bitmap, items);
-  const blob = await canvasBlob(cv, cd.ext);
-  return { bytes: new Uint8Array(await blob.arrayBuffer()), before: URL.createObjectURL(origBlob), after: URL.createObjectURL(blob), n: lines.length };
+  const isSrc = t => sl === "ru" ? (t.match(/[А-Яа-яЁё]/g) || []).length >= 2 : (t.match(/[A-Za-z]/g) || []).length >= 3;
+  const jobs = [];   // {kind, box, ink, text, nLines}
+  let allText = "", skippedLow = 0;
+  const onProg = m => { $("status").textContent = m; };
+  // 1) ячейки
+  for (let k = 0; k < cells.length; k++) {
+    const c = cells[k];
+    if (k % 8 === 0) { onProg("Картинка: ячейка " + (k + 1) + " из " + cells.length); await sleep(0); }
+    const x0 = c.x + 3, y0 = c.y + 3, x1 = c.x + c.w - 3, y1 = c.y + c.h - 3;
+    if (x1 - x0 < 8 || y1 - y0 < 8) continue;
+    const ink = inkInfo(gray, W, x0, y0, x1, y1);
+    if (ink.count < 25) continue;                       // пустая ячейка или значок «+»
+    const scale = c.h < 40 ? 4 : c.h < 80 ? 3 : 2;
+    const data = await ocrCrop(worker, base, x0, y0, x1 - x0, y1 - y0, scale);
+    const text = cleanCell(data.text || ""); allText += " " + text.toLowerCase();
+    if (!isSrc(text)) continue;                         // числа, диапазоны и уже переведённое не трогаем
+    if (data.confidence < 55) { skippedLow++; continue; }
+    jobs.push({ kind: "cell", box: c, ink, text, nLines: Math.max(1, (data.lines || []).length) });
+  }
+  // 2) заголовок и подпись вне таблицы
+  const tTop = Math.min(...cells.map(c => c.y)), tBot = Math.max(...cells.map(c => c.y + c.h));
+  const regions = [[0, Math.max(0, tTop - 3)], [Math.min(H, tBot + 3), H]];
+  for (const [ry0, ry1] of regions) {
+    if (ry1 - ry0 < 14) continue;
+    const ink0 = inkInfo(gray, W, 0, ry0, W, ry1);
+    if (ink0.count < 40) continue;
+    const data = await ocrCrop(worker, base, 0, ry0, W, ry1 - ry0, 3);
+    allText += " " + (data.text || "").toLowerCase();
+    for (const l of (data.lines || [])) {
+      const text = cleanCell(l.text || "");
+      if (l.confidence < 55 || !isSrc(text)) continue;
+      const bx0 = Math.max(0, Math.floor((l.bbox.x0 - 8) / 3)), bx1 = Math.min(W, Math.ceil((l.bbox.x1 - 8) / 3));
+      const by0 = ry0 + Math.max(0, Math.floor((l.bbox.y0 - 8) / 3)), by1 = Math.min(H, ry0 + Math.ceil((l.bbox.y1 - 8) / 3));
+      if (by1 - by0 < 6 || bx1 - bx0 < 6) continue;
+      const ink = inkInfo(gray, W, bx0, by0, bx1, by1);
+      if (ink.count < 10) continue;
+      jobs.push({ kind: "line", box: { x: 0, y: by0, w: W, h: by1 - by0 }, ink, text, nLines: 1, bbox: { x: bx0, y: by0, w: bx1 - bx0, h: by1 - by0 } });
+    }
+  }
+  if (/угму|ugmu|уральск/.test(allText)) return { skip: "логотип УГМУ" };
+  if (!jobs.length) return { skip: "текста для перевода не найдено" };
+  const tr = await translateTexts(jobs.map(j => j.text), sl, tl);
+  const out = document.createElement("canvas"); out.width = W; out.height = H;
+  const ctx = out.getContext("2d"); ctx.drawImage(bitmap, 0, 0);
+  const P = makePainter(px, W, H, ctx);
+  jobs.forEach((j, k) => {
+    const t = (tr[k] || "").trim(); if (!t) return;
+    if (j.kind === "cell") {
+      const c = j.box, bg = P.bgColor(c.x + 5, c.y + 5, c.x + c.w - 5, c.y + c.h - 5);
+      P.drawBox(c, j.ink, t, j.nLines, { x: c.x + 3, y: c.y + 3, w: c.w - 6, h: c.h - 6 }, bg);
+    } else {
+      const b = j.bbox, bg = P.bgColor(b.x - 3, b.y - 3, b.x + b.w + 3, b.y + b.h + 3);
+      const centered = Math.abs(b.x + b.w / 2 - W / 2) < W * 0.06;
+      const box = { x: centered ? Math.max(0, b.x + b.w / 2 - Math.max(b.w * 1.3, W * 0.5) / 2) : b.x, y: b.y, w: Math.min(W, Math.max(b.w * 1.3, W * 0.5)), h: b.h };
+      P.drawBox(box, j.ink, t, 1, { x: 0, y: b.y - 1, w: W, h: b.h + 2 }, bg);
+    }
+  });
+  const blob = await canvasBlob(out, cd.ext);
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), before: URL.createObjectURL(origBlob), after: URL.createObjectURL(blob),
+           n: jobs.length, total: cells.length, low: skippedLow };
 }
 
 async function translateImages(i, sl, tl, tt, fileName) {
