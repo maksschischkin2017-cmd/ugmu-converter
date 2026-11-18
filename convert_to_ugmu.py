@@ -442,10 +442,10 @@ def find_protos(prs, ov):
     pick = {}
     for i, s in enumerate(slides):
         t = " ".join(texts(s))
-        if has_bg(s) and "Название" in t and "title" not in pick: pick["title"] = i
-        if has_bg(s) and "раздела" in t and "section" not in pick: pick["section"] = i
+        if has_bg(s) and ("Название" in t or "Title" in t) and "title" not in pick: pick["title"] = i
+        if has_bg(s) and ("раздела" in t or "Section" in t or "section" in t) and "section" not in pick: pick["section"] = i
         has_line = s._element.find(".//p:cxnSp", NS) is not None
-        if has_line and "Презентация" in t and "content" not in pick: pick["content"] = i
+        if has_line and ("Презентация" in t or "Presentation" in t) and "content" not in pick: pick["content"] = i
     for k, v in (ov or {}).items():
         if v: pick[k] = v - 1
     missing = [k for k in ("title", "section", "content") if k not in pick]
@@ -556,6 +556,132 @@ def verify(src_els, dst_els, dst_slide, n):
 
 
 # ================================================================ основная логика
+
+# ================================================================ определение языка
+CYR = re.compile("[А-Яа-яЁё]")
+LAT = re.compile("[A-Za-z]")
+
+
+def slide_letters(slide):
+    text = " ".join(t.text or "" for t in slide._element.iter(qn("a:t")))
+    return len(CYR.findall(text)), len(LAT.findall(text))
+
+
+def detect_language(src_path):
+    """Определяет язык презентации: 'ru'/'en', а также смешанные файлы (много слайдов на обоих языках)."""
+    prs = Presentation(str(src_path))
+    cnt = [slide_letters(sl) for sl in prs.slides]
+    cyr, lat = sum(c for c, _ in cnt), sum(l for _, l in cnt)
+    kind = []
+    for c, l in cnt:
+        tot = c + l
+        if c >= 25:
+            kind.append("ru")
+        elif l >= 40 and c / max(tot, 1) < 0.05:
+            kind.append("en")
+        else:
+            kind.append(None)          # мало текста / картинки / формулы - язык не определён
+    n_ru, n_en = kind.count("ru"), kind.count("en")
+    mixed = min(n_ru, n_en) >= 3 and min(n_ru, n_en) / (n_ru + n_en) >= 0.25
+    tot = cyr + lat
+    lang = "ru" if tot < 20 or cyr / tot >= 0.4 else "en"
+    idx = {"ru": [i + 1 for i, k in enumerate(kind) if k in ("ru", None)],
+           "en": [i + 1 for i, k in enumerate(kind) if k in ("en", None)]}
+    return {"lang": lang, "mixed": mixed, "idx": idx, "n_ru": n_ru, "n_en": n_en,
+            "summary": ("смешанный: ru %d + en %d слайдов" % (n_ru, n_en)) if mixed else lang}
+
+
+def plan_jobs(src_path, split=True):
+    """Что получится из файла: [(язык, номера слайдов или None)]. Смешанный файл делится на два."""
+    info = detect_language(src_path)
+    if info["mixed"] and split:
+        return info, [("ru", set(info["idx"]["ru"])), ("en", set(info["idx"]["en"]))]
+    return info, [(info["lang"], None)]
+
+
+# ================================================================ перевод
+def _para_text(p):
+    parts = []
+    for ch in p:
+        if ch.tag == qn("a:br"):
+            parts.append(" ")
+        elif ch.tag in (qn("a:r"), qn("a:fld")):
+            parts.append("".join(t.text or "" for t in ch.iter(qn("a:t"))))
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+def _needs_translation(text, src_lang):
+    if src_lang == "ru":
+        return bool(CYR.search(text))
+    return len(LAT.findall(text)) >= 3
+
+
+def extract_translatable(src_path, src_lang):
+    """Уникальные абзацы презентации, которые нужно перевести (текст блоков, таблиц, заголовков)."""
+    prs = Presentation(str(src_path))
+    seen, texts = set(), []
+    for sl in prs.slides:
+        for p in sl._element.iter(qn("a:p")):
+            if p.find(qn("a:fld")) is not None:
+                continue
+            t = _para_text(p)
+            if t and t not in seen and _needs_translation(t, src_lang):
+                seen.add(t); texts.append(t)
+    return texts
+
+
+def count_pictures(src_path):
+    prs = Presentation(str(src_path))
+    return sum(len(sl._element.findall(".//p:pic", NS)) for sl in prs.slides)
+
+
+def apply_translation(src_path, out_path, mapping, tgt_lang):
+    """Сохраняет копию презентации с переведённым текстом. Форматирование первого фрагмента абзаца сохраняется."""
+    prs = Presentation(str(src_path))
+    n = 0
+    for sl in prs.slides:
+        for p in sl._element.iter(qn("a:p")):
+            if p.find(qn("a:fld")) is not None:
+                continue
+            t = _para_text(p)
+            new = mapping.get(t)
+            runs = p.findall(qn("a:r"))
+            if not new or not runs:
+                continue
+            first = runs[0]
+            first.find(qn("a:t")).text = new
+            rpr = first.find(qn("a:rPr"))
+            if rpr is not None:
+                rpr.set("lang", "en-US" if tgt_lang == "en" else "ru-RU")
+            for r in runs[1:]:
+                p.remove(r)
+            for br in p.findall(qn("a:br")):
+                p.remove(br)
+            n += 1
+    prs.save(str(out_path))
+    return n
+
+
+def google_translate_v2(texts, src, tgt, key):
+    """Официальный Google Cloud Translation API (нужен ключ). Используется в консольном режиме."""
+    import json as _json, urllib.request as _rq
+    out = []
+    i = 0
+    while i < len(texts):
+        batch, size = [], 0
+        while i < len(texts) and len(batch) < 100 and size + len(texts[i]) < 20000:
+            batch.append(texts[i]); size += len(texts[i]); i += 1
+        if not batch:
+            batch = [texts[i][:20000]]; i += 1
+        body = _json.dumps({"q": batch, "source": src, "target": tgt, "format": "text"}).encode("utf-8")
+        req = _rq.Request("https://translation.googleapis.com/language/translate/v2?key=" + key, data=body,
+                          headers={"Content-Type": "application/json; charset=utf-8"})
+        with _rq.urlopen(req, timeout=60) as r:
+            data = _json.loads(r.read().decode("utf-8"))
+        out += [t["translatedText"] for t in data["data"]["translations"]]
+    return out
+
+
 def convert_one(template, src_path, out_path, o):
     src = Presentation(str(src_path))
     prs = Presentation(str(template))
@@ -569,9 +695,16 @@ def convert_one(template, src_path, out_path, o):
     layout_idx1 = any(p.placeholder_format.idx == 1 for p in layout_obj.placeholders)
     package, memo, deferred, warnings = prs.part.package, {}, [], []
     slide_map, pairs = {}, []
-    label, counter = o.get("label") or "Презентация", 0
+    _lab = proto_roles_content(protos["content"]).get("label")
+    default_label = (sp_text(_lab).strip() if _lab is not None else "") or "Презентация"
+    if o.get("lang") == "en" and not o.get("en_template"):
+        default_label = "Presentation"
+    label, counter = o.get("label") or default_label, 0
+    keep_idx = o.get("indices")
 
     for n, s in enumerate(src.slides, 1):
+        if keep_idx and n not in keep_idx:
+            continue
         title_sh, guessed = find_title(s, oh, o.get("no_guess"))
         if title_sh is None and n == 1:
             def _sz(sh):
@@ -620,6 +753,10 @@ def convert_one(template, src_path, out_path, o):
             tb = sorted([(get_xfrm(c)[1], c) for _, c in cl if c.tag == qn("p:sp") and sp_text(c).strip()],
                         key=lambda t: t[0])
             t_el, st_el = tb[0][1], (tb[1][1] if len(tb) > 2 else None)
+            if o.get("lang") == "en" and not o.get("en_template") and len(tb) >= 3:
+                _d = tb[-1][1]
+                _y = re.search(r"\d{4}", sp_text(_d))
+                fill_shape(_d, ["Yekaterinburg, " + (_y.group(0) if _y else "2026")])
             x, y, cx, cy = get_xfrm(t_el)
             nxt_y = get_xfrm(tb[1][1])[1] if len(tb) > 1 else y + cy
             bsz, lns = run_props(t_el)
@@ -835,15 +972,20 @@ def inspect(template, ov):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--template", required=True)
+    ap.add_argument("--template", required=True, help="шаблон (русский)")
+    ap.add_argument("--template-en", help="английский шаблон (необязательно; без него английские файлы оформляются русским шаблоном с англ. подписями)")
     ap.add_argument("--src"); ap.add_argument("--out")
     ap.add_argument("--inspect", action="store_true")
-    ap.add_argument("--label", help="надпись слева в шапке (по умолчанию 'Презентация'; после слайда-раздела берётся его название)")
+    ap.add_argument("--no-split", action="store_true", help="не делить смешанные (ru+en) файлы на два")
+    ap.add_argument("--label", help="надпись слева в шапке (по умолчанию из шаблона; после слайда-раздела берётся его название)")
     ap.add_argument("--proto-title", type=int); ap.add_argument("--proto-section", type=int)
     ap.add_argument("--proto-content", type=int)
     ap.add_argument("--keep-fonts", action="store_true", help="не менять шрифты исходника на Montserrat")
     ap.add_argument("--font-comp", type=float, default=1.0,
                     help="дополнительное уменьшение текста при смене шрифта (1 = нет; текст и так уменьшается только там, где не помещается)")
+    ap.add_argument("--translate", action="store_true",
+                    help="сделать вторую версию на другом языке (ru->en, en->ru) через Google Cloud Translation")
+    ap.add_argument("--google-key", help="API-ключ Google Cloud Translation (для --translate)")
     ap.add_argument("--no-guess", action="store_true")
     ap.add_argument("--title-pt", type=int, default=32, help="максимальный размер заголовка на обычных слайдах (в шаблоне 40)")
     a = ap.parse_args()
@@ -852,26 +994,49 @@ def main():
         return inspect(a.template, ov)
     if not (a.src and a.out):
         ap.error("нужны --src и --out")
-    opts = {"proto": ov, "label": a.label, "keep_fonts": a.keep_fonts,
-            "font_comp": a.font_comp, "no_guess": a.no_guess, "title_pt": a.title_pt}
+    tpl = {"ru": a.template, "en": a.template_en or a.template}
+    base = {"proto": ov, "label": a.label, "keep_fonts": a.keep_fonts, "font_comp": a.font_comp,
+            "no_guess": a.no_guess, "title_pt": a.title_pt, "en_template": bool(a.template_en)}
+    if a.translate and not a.google_key:
+        ap.error("для --translate нужен --google-key")
     src_dir, out_dir = Path(a.src), Path(a.out)
     files = sorted(p for p in src_dir.rglob("*.pptx") if not p.name.startswith("~$"))
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for i, f in enumerate(files, 1):
-        dst = out_dir / f.relative_to(src_dir)
+        rel = f.relative_to(src_dir)
         try:
-            n, warns, probs = convert_one(a.template, f, dst, opts)
-            rows.append([f.name, "ПРОВЕРИТЬ" if probs else "ok", n, " | ".join(probs), " | ".join(warns)])
+            info, jobs = plan_jobs(f, not a.no_split)
+            for lang, idx in jobs:
+                o = dict(base, lang=lang, indices=idx)
+                n, warns, probs = convert_one(tpl[lang], f, out_dir / lang / rel, o)
+                rows.append([f.name, info["summary"], lang, "ПРОВЕРИТЬ" if probs else "ok", n,
+                             " | ".join(probs), " | ".join(warns)])
+                print(f"[{i}/{len(files)}] {f.name} -> {lang}/: {rows[-1][3]}")
+            if a.translate and len(jobs) == 1:
+                sl = jobs[0][0]; tl = "en" if sl == "ru" else "ru"
+                texts = extract_translatable(f, sl)
+                mapping = dict(zip(texts, google_translate_v2(texts, sl, tl, a.google_key))) if texts else {}
+                tmp = out_dir / "_tmp_translated.pptx"
+                apply_translation(f, tmp, mapping, tl)
+                o = dict(base, lang=tl, indices=None)
+                n, warns, probs = convert_one(tpl[tl], tmp, out_dir / tl / rel, o)
+                pics = count_pictures(f)
+                if pics:
+                    warns.append(f"картинок: {pics} - текст внутри картинок не переведён")
+                rows.append([f.name, f"перевод {sl}->{tl}", tl, "ПРОВЕРИТЬ" if probs else "ok", n,
+                             " | ".join(probs), " | ".join(warns)])
+                tmp.unlink(missing_ok=True)
+                print(f"[{i}/{len(files)}] {f.name} -> {tl}/ (перевод): {rows[-1][3]}")
         except Exception as e:
-            rows.append([f.name, "ОШИБКА", 0, f"{type(e).__name__}: {e}", ""])
+            rows.append([f.name, "?", "", "ОШИБКА", 0, f"{type(e).__name__}: {e}", ""])
             traceback.print_exc()
-        print(f"[{i}/{len(files)}] {f.name}: {rows[-1][1]}")
+            print(f"[{i}/{len(files)}] {f.name}: ОШИБКА")
     with open(out_dir / "report.csv", "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh, delimiter=";")
-        w.writerow(["файл", "статус", "слайдов", "потери/расхождения", "предупреждения"])
+        w.writerow(["файл", "язык оригинала", "папка", "статус", "слайдов", "потери/расхождения", "предупреждения"])
         w.writerows(rows)
-    print(f"\nГотово. Отчёт: {out_dir / 'report.csv'}")
+    print(f"\nГотово. Папки: {out_dir / 'ru'} и {out_dir / 'en'}. Отчёт: {out_dir / 'report.csv'}")
 
 
 if __name__ == "__main__":
