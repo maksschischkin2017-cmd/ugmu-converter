@@ -454,12 +454,13 @@ async function processImage(cd, bytes, sl, tl) {
     for (let i = 0; i < gW * gH; i++) g2[i] = (p2[i * 4] * 299 + p2[i * 4 + 1] * 587 + p2[i * 4 + 2] * 114) / 1000;
     cells = findCells(g2, gW, gH).map(c => ({ x: Math.round(c.x * d), y: Math.round(c.y * d), w: Math.round(c.w * d), h: Math.round(c.h * d) }));
   } else cells = findCells(gray, W, H);
-  if (cells.length < 4) return { skip: "не таблица (сетка не найдена), картинка не тронута" };
+  if (cells.length < 4) return { skip: "сетка таблицы не найдена (ячеек: " + cells.length + ", размер " + W + "x" + H + "), картинка не тронута" };
 
   const worker = await getWorker();
   const isSrc = t => sl === "ru" ? (t.match(/[А-Яа-яЁё]/g) || []).length >= 2 : (t.match(/[A-Za-z]/g) || []).length >= 3;
   const jobs = [];   // {kind, box, ink, text, nLines}
   let allText = "", skippedLow = 0;
+  const st = { read: 0, nonSrc: 0, sample: "" };
   const onProg = m => { $("status").textContent = m; };
   // 1) ячейки
   for (let k = 0; k < cells.length; k++) {
@@ -472,8 +473,9 @@ async function processImage(cd, bytes, sl, tl) {
     const scale = c.h < 40 ? 4 : c.h < 80 ? 3 : 2;
     const data = await ocrCrop(worker, base, x0, y0, x1 - x0, y1 - y0, scale);
     const text = cleanCell(data.text || ""); allText += " " + text.toLowerCase();
-    if (!isSrc(text)) continue;                         // числа, диапазоны и уже переведённое не трогаем
-    if (data.confidence < 55) { skippedLow++; continue; }
+    st.read++; if (!st.sample && text) st.sample = text.slice(0, 40);
+    if (!isSrc(text)) { st.nonSrc++; continue; }        // числа, диапазоны и уже переведённое не трогаем
+    if (data.confidence < 45) { skippedLow++; continue; }
     jobs.push({ kind: "cell", box: c, ink, text, nLines: Math.max(1, (data.lines || []).length) });
   }
   // 2) заголовок и подпись вне таблицы
@@ -497,7 +499,7 @@ async function processImage(cd, bytes, sl, tl) {
     }
   }
   if (/угму|ugmu|уральск/.test(allText)) return { skip: "логотип УГМУ" };
-  if (!jobs.length) return { skip: "текста для перевода не найдено" };
+  if (!jobs.length) return { skip: "ячеек: " + cells.length + "; прочитано: " + st.read + "; не на исходном языке: " + st.nonSrc + "; низкая уверенность: " + skippedLow + "; пример распознанного: «" + st.sample + "»" };
   const tr = await translateTexts(jobs.map(j => j.text), sl, tl);
   const out = document.createElement("canvas"); out.width = W; out.height = H;
   const ctx = out.getContext("2d"); ctx.drawImage(bitmap, 0, 0);
@@ -521,7 +523,7 @@ async function processImage(cd, bytes, sl, tl) {
 
 async function translateImages(i, sl, tl, tt, fileName) {
   const cands = JSON.parse(prepFn(i, sl, JSON.stringify(tt)));
-  let done = 0, skipped = 0;
+  let done = 0, skipped = 0; const reasons = [];
   for (let c = 0; c < cands.length; c++) {
     const cd = cands[c];
     $("status").textContent = "Картинки: " + fileName + " (" + (c + 1) + " из " + cands.length + ")";
@@ -543,9 +545,15 @@ async function translateImages(i, sl, tl, tt, fileName) {
           "<div class='pair'><img src='" + res.before + "'><img src='" + res.after + "'></div>";
         $("gal").appendChild(fig);
       }
-    } else skipped++;
+    } else { skipped++; reasons.push("слайд " + cd.slides.join(",") + ": " + (res.skip || "?")); }
   }
-  return { done, skipped, total: cands.length };
+  if (reasons.length) {
+    $("galCard").hidden = false;
+    const p = document.createElement("p"); p.className = "warn";
+    p.innerHTML = "<b>" + esc(fileName) + ": картинки, которые не переведены</b><br>" + reasons.map(esc).join("<br>");
+    $("gal").appendChild(p);
+  }
+  return { done, skipped, total: cands.length, reasons };
 }
 
 $("trOn").onchange = () => { $("trBox").hidden = $("trOn").value !== "1"; };
@@ -589,7 +597,7 @@ $("go").onclick = async () => {
             try {
               const ir = await translateImages(i, r.tr.sl, r.tr.tl, tt, f.name);
               useImg = 1;
-              imgNote = "картинок переведено: " + ir.done + " из " + ir.total + " (остальные без текста или пропущены) - проверьте результат";
+              imgNote = "картинок переведено: " + ir.done + " из " + ir.total + (ir.reasons.length ? ". Не переведены: " + ir.reasons.join("; ").slice(0, 700) : "") + " - проверьте результат";
             } catch (e) { imgNote = "картинки не переведены: " + String(e.message || e).slice(0, 120); useImg = 0; }
           }
           const r2 = JSON.parse(finishFn(i, label, fc, tpt, r.tr.sl, useImg ? "" : JSON.stringify(tt), useImg));
