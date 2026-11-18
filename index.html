@@ -29,7 +29,7 @@ details summary{cursor:pointer;color:var(--accent)}
 table{width:100%;border-collapse:collapse;font-size:.9rem}
 td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertical-align:top}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--muted);font-size:.82rem}
-#status{color:var(--muted)}\n
+#status{color:var(--muted)}\n#gal figure{margin:0 0 16px}#gal .pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}#gal img{width:100%;border:1px solid var(--line);background:#fff}#gal figcaption{font-size:.8rem;color:var(--muted);margin-bottom:4px}\n
 </style>
 </head>
 <body>
@@ -56,7 +56,10 @@ td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
         </select>
         <div id="keyBox"><label>API-ключ Google Cloud Translation (хранится только в этой вкладке, никуда не отправляется, кроме Google)</label>
         <input type="password" id="trKey" placeholder="AIza..." autocomplete="off"></div>
-        <p class="warn">Переводится текст слайдов и таблиц. Текст внутри картинок не переводится (в отчёте это будет отмечено).
+        <label style="display:flex;gap:8px;align-items:flex-start;color:var(--fg)"><input type="checkbox" id="imgOn" style="margin-top:4px">
+          <span>Переводить текст на картинках (бета). Бесплатное распознавание Tesseract прямо в браузере.
+          Картинки с логотипом УГМУ, маленькие и титульные не трогаются. Если результат плохой, просто снимите галочку.</span></label>
+        <p class="warn">Переводится текст слайдов и таблиц. Без галочки выше текст внутри картинок не переводится (в отчёте это отмечено). С галочкой первая загрузка распознавалки занимает время (десятки МБ), а каждая картинка обрабатывается заметно дольше.
         Смешанные файлы (русские и английские слайды вместе) только делятся, не переводятся.</p>
       </div>
       <label>Надпись слева в шапке слайдов (по умолчанию «Презентация»)</label>
@@ -69,6 +72,12 @@ td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
     <p><button id="go" disabled>Конвертировать</button></p>
     <div class="bar"><div id="prog"></div></div>
     <div id="status">Загрузка Python в браузер…</div>
+  </div>
+
+  <div class="card" id="galCard" hidden>
+    <h3 style="margin-top:0">Картинки с переводом: проверьте результат</h3>
+    <p class="warn">Слева оригинал, справа перевод. Если результат плохой, отключите перевод картинок в настройках и запустите заново.</p>
+    <div id="gal"></div>
   </div>
 
   <div class="card" id="resCard" hidden>
@@ -89,7 +98,7 @@ td,th{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-let pyodide = null, runFn = null, finishFn = null, files = [], outputs = [], rows = [];
+let pyodide = null, runFn = null, finishFn = null, prepFn = null, files = [], outputs = [], rows = [];
 
 const PY_ENTRY = `
 import json, os, convert_to_ugmu as c
@@ -97,6 +106,7 @@ import js
 if getattr(js, "fontOk", False):
     c.MEASURE = js.measureWord
 TEXTS = {}
+import os
 def _paths():
     en_sep = os.path.exists("/work/template_en.pptx")
     return en_sep, {"ru": "/work/template.pptx", "en": "/work/template_en.pptx" if en_sep else "/work/template.pptx"}
@@ -120,18 +130,35 @@ def run(i, label, font_comp, title_pt, split, translate):
         TEXTS[i] = texts
         tr = {"sl": sl, "tl": "en" if sl == "ru" else "ru", "texts": texts}
     return json.dumps({"summary": info["summary"], "res": res, "tr": tr})
-def finish(i, label, font_comp, title_pt, sl, translations_json):
+def prep(i, sl, translations_json):
+    """Шаг 1 для картинок: переводим текст слайдов и выкладываем крупные картинки для распознавания."""
+    tl = "en" if sl == "ru" else "ru"
+    mapping = dict(zip(TEXTS.get(i, []), json.loads(translations_json)))
+    tr = "/work/in/%d_tr.pptx" % i
+    c.apply_translation("/work/in/%d.pptx" % i, tr, mapping, tl)
+    os.makedirs("/work/img_out/%d" % i, exist_ok=True)
+    return json.dumps(c.image_candidates(tr, "/work/img/%d" % i))
+def finish(i, label, font_comp, title_pt, sl, translations_json, use_images):
     en_sep, tpl = _paths()
     tl = "en" if sl == "ru" else "ru"
     src = "/work/in/%d.pptx" % i
-    mapping = dict(zip(TEXTS.pop(i, []), json.loads(translations_json)))
-    c.apply_translation(src, "/work/in/%d_tr.pptx" % i, mapping, tl)
-    n, w, p = c.convert_one(tpl[tl], "/work/in/%d_tr.pptx" % i, "/work/out/%d_%s.pptx" % (i, tl),
+    tr = "/work/in/%d_tr.pptx" % i
+    if use_images:
+        c.replace_images(tr, "/work/img_out/%d" % i)
+    else:
+        mapping = dict(zip(TEXTS.get(i, []), json.loads(translations_json)))
+        c.apply_translation(src, tr, mapping, tl)
+    TEXTS.pop(i, None)
+    n, w, p = c.convert_one(tpl[tl], tr, "/work/out/%d_%s.pptx" % (i, tl),
                             _opts(label, font_comp, title_pt, tl, None, en_sep))
-    pics = c.count_pictures(src)
-    if pics:
-        w = w + ["картинок: %d - текст внутри картинок не переведён" % pics]
-    os.remove("/work/in/%d_tr.pptx" % i)
+    if not use_images:
+        pics = c.count_pictures(src)
+        if pics:
+            w = w + ["картинок: %d - текст внутри картинок не переведён" % pics]
+    os.remove(tr)
+    import shutil
+    for d in ("/work/img/%d" % i, "/work/img_out/%d" % i):
+        shutil.rmtree(d, ignore_errors=True)
     return json.dumps({"lang": tl, "n": n, "w": w, "p": p})
 `;
 
@@ -149,7 +176,7 @@ async function init() {
     $("status").textContent = "Устанавливаю python-pptx…";
     await pyodide.loadPackage(["micropip", "lxml", "Pillow"]);
     await pyodide.runPythonAsync("import micropip\nawait micropip.install('python-pptx')");
-    for (const d of ["/work", "/work/in", "/work/out"]) pyodide.FS.mkdir(d);
+    for (const d of ["/work", "/work/in", "/work/out", "/work/img", "/work/img_out"]) pyodide.FS.mkdir(d);
     const [tpl, py] = await Promise.all([
       fetch("template.pptx").then(r => { if (!r.ok) throw new Error("template.pptx не найден"); return r.arrayBuffer(); }),
       fetch("convert_to_ugmu.py").then(r => { if (!r.ok) throw new Error("convert_to_ugmu.py не найден"); return r.text(); })
@@ -165,6 +192,7 @@ async function init() {
     await pyodide.runPythonAsync("import sys\nsys.path.insert(0,'/work')\n" + PY_ENTRY);
     runFn = pyodide.globals.get("run");
     finishFn = pyodide.globals.get("finish");
+    prepFn = pyodide.globals.get("prep");
     $("status").textContent = "Готово к работе. Выберите файлы." + (window.fontOk ? "" : " (шрифт Montserrat не загрузился, размеры текста считаются приблизительно)");
     updateUi();
   } catch (e) {
@@ -242,6 +270,137 @@ async function translateTexts(texts, sl, tl) {
   return out;
 }
 
+// ---------- перевод текста на картинках (Tesseract.js, бесплатно, в браузере)
+let ocrWorker = null, logoHash = null, galCount = 0;
+const _imgCache = new Map();
+function loadScript(src) {
+  return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("не загрузился " + src)); document.head.appendChild(s); });
+}
+async function getWorker() {
+  if (ocrWorker) return ocrWorker;
+  $("status").textContent = "Загружаю распознавание текста (первый раз это долго)…";
+  if (!window.Tesseract) await loadScript("https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js");
+  ocrWorker = await Tesseract.createWorker(["rus", "eng"]);
+  return ocrWorker;
+}
+function aHash(bitmap) {
+  const c = document.createElement("canvas"); c.width = c.height = 8;
+  const x = c.getContext("2d"); x.drawImage(bitmap, 0, 0, 8, 8);
+  const d = x.getImageData(0, 0, 8, 8).data, g = [];
+  for (let i = 0; i < 64; i++) g.push((d[i*4] + d[i*4+1] + d[i*4+2]) / 3);
+  const m = g.reduce((a, b) => a + b, 0) / 64;
+  return g.map(v => v > m ? 1 : 0);
+}
+function hamming(a, b) { let n = 0; for (let i = 0; i < 64; i++) if (a[i] !== b[i]) n++; return n; }
+async function loadLogoHash() {
+  if (logoHash !== null) return logoHash;
+  logoHash = false;
+  try {   // необязательно: logo.png в репозитории - образец логотипа, который не нужно переводить
+    const r = await fetch("logo.png");
+    if (r.ok && (r.headers.get("content-type") || "").startsWith("image")) logoHash = aHash(await createImageBitmap(await r.blob()));
+  } catch (_) {}
+  return logoHash;
+}
+function median(a) { a.sort((x, y) => x - y); return a[a.length >> 1]; }
+function lum(r, g, b) { return 0.299 * r + 0.587 * g + 0.114 * b; }
+
+function renderTranslated(bitmap, items) {
+  const w = bitmap.width, h = bitmap.height;
+  const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0);
+  const px = ctx.getImageData(0, 0, w, h).data;
+  const at = (x, y) => { const i = (Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))) * 4; return [px[i], px[i+1], px[i+2]]; };
+  for (const it of items) {
+    const pad = 2, x0 = Math.max(0, Math.floor(it.x0) - pad), y0 = Math.max(0, Math.floor(it.y0) - pad);
+    const x1 = Math.min(w, Math.ceil(it.x1) + pad), y1 = Math.min(h, Math.ceil(it.y1) + pad);
+    const bw = x1 - x0, bh = y1 - y0;
+    if (bw < 4 || bh < 4) continue;
+    // цвет фона: медиана пикселей по кольцу вокруг рамки
+    const R = [], G = [], B = [];
+    for (let x = x0 - 3; x <= x1 + 3; x += 2) for (const y of [y0 - 3, y0 - 2, y1 + 2, y1 + 3]) { const c = at(x, y); R.push(c[0]); G.push(c[1]); B.push(c[2]); }
+    for (let y = y0; y <= y1; y += 2) for (const x of [x0 - 3, x0 - 2, x1 + 2, x1 + 3]) { const c = at(x, y); R.push(c[0]); G.push(c[1]); B.push(c[2]); }
+    const bg = [median(R), median(G), median(B)], bgL = lum(...bg);
+    // цвет текста: самые контрастные пиксели внутри рамки
+    const diffs = [];
+    for (let y = y0 + pad; y < y1 - pad; y++) for (let x = x0 + pad; x < x1 - pad; x++) { const c = at(x, y); diffs.push([Math.abs(lum(...c) - bgL), c]); }
+    diffs.sort((a, b) => b[0] - a[0]);
+    const top = diffs.slice(0, Math.max(3, Math.floor(diffs.length * 0.08)));
+    let fg = top.length ? [0, 1, 2].map(k => Math.round(top.reduce((s, d) => s + d[1][k], 0) / top.length)) : [0, 0, 0];
+    if (!top.length || Math.abs(lum(...fg) - bgL) < 70) fg = bgL > 128 ? [20, 20, 20] : [245, 245, 245];
+    ctx.fillStyle = "rgb(" + bg.join(",") + ")"; ctx.fillRect(x0, y0, bw, bh);
+    // подбор размера шрифта под ширину рамки
+    let size = Math.min(bh * 0.85, 60);
+    const maxW = bw * 1.04;
+    ctx.textBaseline = "middle";
+    const font = s => s + "px Montserrat, Arial, sans-serif";
+    ctx.font = font(size);
+    while (size > 7 && ctx.measureText(it.text).width > maxW) { size -= 0.5; ctx.font = font(size); }
+    ctx.fillStyle = "rgb(" + fg.join(",") + ")";
+    ctx.fillText(it.text, x0 + pad, y0 + bh / 2, maxW);   // 4-й параметр сожмёт текст, если он всё равно шире
+  }
+  return cv;
+}
+
+function canvasBlob(cv, ext) {
+  return new Promise(res => cv.toBlob(res, ext === "png" ? "image/png" : "image/jpeg", 0.93));
+}
+
+async function processImage(cd, bytes, sl, tl) {
+  const mime = cd.ext === "png" ? "image/png" : "image/jpeg";
+  const origBlob = new Blob([bytes], { type: mime });
+  const bitmap = await createImageBitmap(origBlob);
+  const lh = await loadLogoHash();
+  if (lh && hamming(aHash(bitmap), lh) <= 10) return { skip: "логотип" };
+  // увеличиваем мелкие картинки для лучшего распознавания
+  const k = Math.min(3, Math.max(1, 2200 / bitmap.width));
+  const oc = document.createElement("canvas"); oc.width = Math.round(bitmap.width * k); oc.height = Math.round(bitmap.height * k);
+  oc.getContext("2d").drawImage(bitmap, 0, 0, oc.width, oc.height);
+  const worker = await getWorker();
+  const { data } = await worker.recognize(oc);
+  const full = (data.text || "").toLowerCase();
+  if (/угму|ugmu|уральск/.test(full)) return { skip: "логотип УГМУ" };
+  const isSrc = t => sl === "ru" ? /[А-Яа-яЁё]/.test(t) : (t.match(/[A-Za-z]/g) || []).length >= 3;
+  const lines = (data.lines || []).filter(l => l.confidence >= 55 && l.text.trim().length >= 2 && isSrc(l.text)
+    && (l.bbox.y1 - l.bbox.y0) / k >= 6);
+  if (!lines.length) return { skip: "текста не найдено" };
+  const texts = lines.map(l => l.text.replace(/\s+/g, " ").trim());
+  const tr = await translateTexts(texts, sl, tl);
+  const items = lines.map((l, j) => ({ x0: l.bbox.x0 / k, y0: l.bbox.y0 / k, x1: l.bbox.x1 / k, y1: l.bbox.y1 / k, text: tr[j] }));
+  const cv = renderTranslated(bitmap, items);
+  const blob = await canvasBlob(cv, cd.ext);
+  return { bytes: new Uint8Array(await blob.arrayBuffer()), before: URL.createObjectURL(origBlob), after: URL.createObjectURL(blob), n: lines.length };
+}
+
+async function translateImages(i, sl, tl, tt, fileName) {
+  const cands = JSON.parse(prepFn(i, sl, JSON.stringify(tt)));
+  let done = 0, skipped = 0;
+  for (let c = 0; c < cands.length; c++) {
+    const cd = cands[c];
+    $("status").textContent = "Картинки: " + fileName + " (" + (c + 1) + " из " + cands.length + ")";
+    await sleep(20);
+    const bytes = pyodide.FS.readFile("/work/img/" + i + "/" + cd.id + "." + cd.ext);
+    const key = cd.id + sl + tl;
+    let res = _imgCache.get(key);
+    if (res === undefined) {
+      try { res = await processImage(cd, bytes, sl, tl); } catch (e) { res = { skip: "ошибка: " + String(e.message || e).slice(0, 80) }; }
+      _imgCache.set(key, res);
+    }
+    if (res.bytes) {
+      pyodide.FS.writeFile("/work/img_out/" + i + "/" + cd.id + "." + cd.ext, res.bytes);
+      done++;
+      if (galCount < 60) {
+        galCount++; $("galCard").hidden = false;
+        const fig = document.createElement("figure");
+        fig.innerHTML = "<figcaption>" + esc(fileName) + ", слайды: " + cd.slides.join(", ") + " (строк переведено: " + res.n + ")</figcaption>" +
+          "<div class='pair'><img src='" + res.before + "'><img src='" + res.after + "'></div>";
+        $("gal").appendChild(fig);
+      }
+    } else skipped++;
+  }
+  return { done, skipped, total: cands.length };
+}
+
 $("trOn").onchange = () => { $("trBox").hidden = $("trOn").value !== "1"; };
 $("trMode").onchange = () => { $("keyBox").hidden = $("trMode").value !== "api"; };
 
@@ -278,7 +437,16 @@ $("go").onclick = async () => {
         try {
           const tt = await translateTexts(r.tr.texts, r.tr.sl, r.tr.tl);
           totalChars += r.tr.texts.reduce((a, t) => a + t.length, 0);
-          const r2 = JSON.parse(finishFn(i, label, fc, tpt, r.tr.sl, JSON.stringify(tt)));
+          let useImg = 0, imgNote = "";
+          if ($("imgOn").checked) {
+            try {
+              const ir = await translateImages(i, r.tr.sl, r.tr.tl, tt, f.name);
+              useImg = 1;
+              imgNote = "картинок переведено: " + ir.done + " из " + ir.total + " (остальные без текста или пропущены) - проверьте результат";
+            } catch (e) { imgNote = "картинки не переведены: " + String(e.message || e).slice(0, 120); useImg = 0; }
+          }
+          const r2 = JSON.parse(finishFn(i, label, fc, tpt, r.tr.sl, useImg ? "" : JSON.stringify(tt), useImg));
+          if (imgNote) r2.w.push(imgNote);
           const out2 = "/work/out/" + i + "_" + r2.lang + ".pptx";
           let name2 = f.name; if (used[r2.lang].has(name2)) name2 = i + "_" + name2; used[r2.lang].add(name2);
           outputs.push({ name: r2.lang + "/" + name2, data: pyodide.FS.readFile(out2) });

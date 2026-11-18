@@ -682,6 +682,78 @@ def google_translate_v2(texts, src, tgt, key):
     return out
 
 
+# ================================================================ перевод текста на картинках
+import hashlib
+
+
+def _iter_pics(prs):
+    sw, sh = prs.slide_width, prs.slide_height
+    for n, sl in enumerate(prs.slides, 1):
+        for pic in sl._element.iter(qn("p:pic")):
+            blip = pic.find(".//a:blip", NS)
+            if blip is None:
+                continue
+            rid = blip.get("{%s}embed" % R_NS)
+            if not rid:
+                continue
+            try:
+                part = sl.part.related_part(rid)
+            except KeyError:
+                continue
+            ext = str(part.partname).rsplit(".", 1)[-1].lower()
+            e = pic.find(".//a:xfrm/a:ext", NS)
+            area = (int(e.get("cx")) * int(e.get("cy")) / (sw * sh)) if e is not None else 0.0
+            yield n, part, ext, area
+
+
+def image_candidates(path, out_dir, min_area=0.05):
+    """Картинки, в которых стоит искать текст: достаточно крупные, не только на титульном слайде.
+    Файлы пишутся в out_dir (имя = id.расширение). Возвращает список описаний."""
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+    prs = Presentation(str(path))
+    found = {}
+    for n, part, ext, area in _iter_pics(prs):
+        if ext not in ("png", "jpg", "jpeg"):
+            continue
+        iid = hashlib.sha1(part.blob).hexdigest()[:16]
+        d = found.setdefault(iid, {"id": iid, "ext": "jpg" if ext == "jpeg" else ext, "area": 0.0,
+                                   "slides": [], "blob": part.blob})
+        d["area"] = max(d["area"], area)
+        if n not in d["slides"]:
+            d["slides"].append(n)
+    out = []
+    for d in found.values():
+        if d["area"] < min_area or d["slides"] == [1]:
+            continue
+        with open(os.path.join(out_dir, d["id"] + "." + d["ext"]), "wb") as fh:
+            fh.write(d.pop("blob"))
+        out.append(d)
+    return out
+
+
+def replace_images(path, img_dir):
+    """Подставляет переведённые картинки (файлы id.расширение в img_dir) на место исходных."""
+    import os
+    new = {}
+    for fn in os.listdir(img_dir):
+        with open(os.path.join(img_dir, fn), "rb") as fh:
+            new[fn.rsplit(".", 1)[0]] = fh.read()
+    if not new:
+        return 0
+    prs = Presentation(str(path))
+    done, seen = 0, set()
+    for n, part, ext, area in _iter_pics(prs):
+        if id(part) in seen:
+            continue
+        iid = hashlib.sha1(part.blob).hexdigest()[:16]
+        if iid in new:
+            part._blob = new[iid]
+            seen.add(id(part)); done += 1
+    prs.save(str(path))
+    return done
+
+
 def convert_one(template, src_path, out_path, o):
     src = Presentation(str(src_path))
     prs = Presentation(str(template))
