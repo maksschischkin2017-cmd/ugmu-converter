@@ -397,19 +397,24 @@ function makePainter(px, W, H, ctx) {
     const bold = density > 0.34;
     const maxW = box.w - 6, availH = box.h - 6;
     const origLine = (ink.y1 - ink.y0) / Math.max(1, nLines);
-    let size = Math.max(8, Math.min(origLine * 0.95, box.h * 0.6, 60));
+    let size = Math.max(6, Math.min(origLine * 0.9, box.h * 0.6, 60));   // не крупнее оригинала
     let lines;
     for (; ; size -= 0.5) {
       ctx.font = FONT(bold, size); lines = wrapLines(ctx, text, maxW);
-      const okW = lines.every(l => ctx.measureText(l).width <= maxW * 1.02);
-      if ((lines.length * size * 1.18 <= availH && okW) || size <= 7) break;
+      const okW = lines.every(l => ctx.measureText(l).width <= maxW);
+      if ((lines.length * size * 1.12 <= availH && okW) || size <= 5) break;
     }
     const centered = Math.abs((ink.x0 + ink.x1) / 2 - (box.x + box.w / 2)) <= box.w * 0.12;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(fillRect.x, fillRect.y, fillRect.w, fillRect.h); ctx.clip();   // текст не выходит за свою ячейку
     ctx.fillStyle = "rgb(" + fg.join(",") + ")";
     ctx.textBaseline = "middle"; ctx.textAlign = centered ? "center" : "left";
-    const cy = (ink.y0 + ink.y1) / 2, lh = size * 1.18;
+    const lh = size * 1.12;
+    let cy = (ink.y0 + ink.y1) / 2;
+    cy = Math.min(Math.max(cy, fillRect.y + (lines.length * lh) / 2), fillRect.y + fillRect.h - (lines.length * lh) / 2);
     const tx = centered ? box.x + box.w / 2 : Math.max(box.x + 3, ink.x0);
-    lines.forEach((l, k) => ctx.fillText(l, tx, cy - (lines.length - 1) * lh / 2 + k * lh, maxW * 1.02));
+    lines.forEach((l, k) => ctx.fillText(l, tx, cy - (lines.length - 1) * lh / 2 + k * lh, maxW));
+    ctx.restore();
   };
   return { bgColor, drawBox };
 }
